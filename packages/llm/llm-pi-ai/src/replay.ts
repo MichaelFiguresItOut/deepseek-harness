@@ -32,6 +32,10 @@ export interface PiAiReplayResponse {
   /** Provider-native effort for historical replay; absence is preserved. */
   providerThinkingLevel?: string
   stopReason: AssistantMessage['stopReason']
+  /** Provider-reported usage, stored verbatim; restored only when prefixDigest still matches. */
+  usage?: PiUsage
+  /** SHA-256 hex digest of the normalized request prefix that produced `usage`. */
+  prefixDigest?: string
 }
 
 /** The validated halves of one pi-ai replay envelope. */
@@ -65,6 +69,33 @@ function emptyPiUsage(): PiUsage {
   }
 }
 
+/** True for finite non-negative numbers; the only shape a usage field may take. */
+function isFiniteNonNegative(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+/**
+ * Validate a stored provider usage record without normalizing it. The record
+ * is returned unchanged when usable so replay restores the provider's values
+ * verbatim, including forward-compatible fields this build does not know.
+ */
+function readPiUsage(value: unknown): PiUsage | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const usage = value as Record<string, unknown>
+  for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens'] as const) {
+    if (!isFiniteNonNegative(usage[key])) return undefined
+  }
+  for (const key of ['cacheWrite1h', 'reasoning'] as const) {
+    if (usage[key] !== undefined && !isFiniteNonNegative(usage[key])) return undefined
+  }
+  const cost = usage['cost']
+  if (typeof cost !== 'object' || cost === null || Array.isArray(cost)) return undefined
+  for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'total'] as const) {
+    if (!isFiniteNonNegative((cost as Record<string, unknown>)[key])) return undefined
+  }
+  return usage as unknown as PiUsage
+}
+
 /**
  * Project a successful pi-ai response into the minimal durable replay state.
  * The per-block half is index-aligned with the streamed blocks (pi-ai content
@@ -72,9 +103,15 @@ function emptyPiUsage(): PiUsage {
  * removes one.
  * @param message - completed native pi-ai assistant response.
  * @param requestedModel - request identity stored in the assistant source; defaults to the native model.
+ * @param capture - optional provider usage plus the digest of the normalized
+ *   request prefix that produced it; stored verbatim for later restore checks.
  * @returns the versioned lossless-JSON replay projection.
  */
-export function toPiReplayState(message: AssistantMessage, requestedModel = message.model): ReplayEnvelope {
+export function toPiReplayState(
+  message: AssistantMessage,
+  requestedModel = message.model,
+  capture?: { usage: PiUsage; prefixDigest: string },
+): ReplayEnvelope {
   const response: PiAiReplayResponse = {
     kind: 'pi-ai',
     version: 2,
@@ -85,6 +122,7 @@ export function toPiReplayState(message: AssistantMessage, requestedModel = mess
     ...message.responseId === undefined ? {} : { responseId: message.responseId },
     ...message.providerThinkingLevel === undefined ? {} : { providerThinkingLevel: message.providerThinkingLevel },
     stopReason: message.stopReason,
+    ...(capture === undefined ? {} : { usage: capture.usage, prefixDigest: capture.prefixDigest }),
   }
   return {
     response,
@@ -119,7 +157,9 @@ function readReplayState(value: unknown): PiAiReplayState {
   const envelope = value as Record<string, unknown>
   const rawResponse = envelope['response']
   if (typeof rawResponse !== 'object' || rawResponse === null || Array.isArray(rawResponse)) return invalidReplay('expected a response object')
-  const response = rawResponse as Record<string, unknown>
+  // Shallow copy: malformed usage/prefixDigest halves are stripped from the
+  // copy so the durable input is never mutated.
+  const response: Record<string, unknown> = { ...(rawResponse as Record<string, unknown>) }
   if (response['kind'] !== 'pi-ai') return invalidReplay('unknown state kind')
   if (response['version'] !== 2) return invalidReplay(`unsupported version ${String(response['version'])}`)
   for (const key of ['api', 'provider', 'model'] as const) {
@@ -131,6 +171,16 @@ function readReplayState(value: unknown): PiAiReplayState {
   if (response['responseModel'] !== undefined && typeof response['responseModel'] !== 'string') return invalidReplay('responseModel must be a string')
   if (response['responseId'] !== undefined && typeof response['responseId'] !== 'string') return invalidReplay('responseId must be a string')
   if (response['providerThinkingLevel'] !== undefined && typeof response['providerThinkingLevel'] !== 'string') return invalidReplay('providerThinkingLevel must be a string')
+  // The usage/prefixDigest pair is optional legacy-compatible metadata. A
+  // malformed half strips both so the envelope degrades to legacy behavior
+  // instead of failing the request; restore then yields zero usage.
+  if (response['usage'] !== undefined || response['prefixDigest'] !== undefined) {
+    const digest = response['prefixDigest']
+    if (readPiUsage(response['usage']) === undefined || typeof digest !== 'string' || digest.length === 0) {
+      delete response['usage']
+      delete response['prefixDigest']
+    }
+  }
   const blocks = envelope['blocks']
   if (!Array.isArray(blocks)) return invalidReplay('blocks must be an array')
   for (const [index, value] of blocks.entries()) {
@@ -146,6 +196,23 @@ function readReplayState(value: unknown): PiAiReplayState {
     response: response as unknown as PiAiReplayResponse,
     blocks: blocks as PiAiReplayBlock[],
   }
+}
+
+/**
+ * Cheap predicate over a raw durable envelope: true when it carries the
+ * usage/prefixDigest pair well enough to be worth recomputing a prefix digest.
+ * Full validation still happens in readReplayState; a false positive only costs
+ * one hash, and restore requires both halves to survive that check anyway.
+ */
+export function replayStateCarriesUsage(state: unknown): boolean {
+  if (typeof state !== 'object' || state === null || Array.isArray(state)) return false
+  const response = (state as Record<string, unknown>)['response']
+  if (typeof response !== 'object' || response === null || Array.isArray(response)) return false
+  const record = response as Record<string, unknown>
+  const usage = record['usage']
+  const digest = record['prefixDigest']
+  return typeof usage === 'object' && usage !== null && !Array.isArray(usage)
+    && typeof digest === 'string' && digest.length > 0
 }
 
 /** Convert provider-neutral blocks without trusting them as same-model replay. */
@@ -183,8 +250,19 @@ function foreignAssistant(message: HarnessAssistantMessage): AssistantMessage {
   }
 }
 
+/** Restore stored usage only when the request prefix digest still matches. */
+function restorePiUsage(response: PiAiReplayResponse, expectedPrefixDigest?: string): PiUsage {
+  if (response.usage !== undefined && response.prefixDigest === expectedPrefixDigest) return response.usage
+  return emptyPiUsage()
+}
+
 /** Recombine durable Harness content with validated pi-ai replay metadata. */
-function replayedAssistant(message: HarnessAssistantMessage, source: ModelMessageSource, rawState: unknown): AssistantMessage {
+function replayedAssistant(
+  message: HarnessAssistantMessage,
+  source: ModelMessageSource,
+  rawState: unknown,
+  expectedPrefixDigest?: string,
+): AssistantMessage {
   const state = readReplayState(rawState)
   if (state.response.provider !== source.provider) return invalidReplay('provider does not match assistant source')
   if (state.response.model !== source.model) return invalidReplay('model does not match assistant source')
@@ -225,7 +303,7 @@ function replayedAssistant(message: HarnessAssistantMessage, source: ModelMessag
     ...state.response.responseModel === undefined ? {} : { responseModel: state.response.responseModel },
     ...state.response.responseId === undefined ? {} : { responseId: state.response.responseId },
     ...state.response.providerThinkingLevel === undefined ? {} : { providerThinkingLevel: state.response.providerThinkingLevel },
-    usage: emptyPiUsage(),
+    usage: restorePiUsage(state.response, expectedPrefixDigest),
     stopReason: state.response.stopReason,
     timestamp: 0,
   }
@@ -242,13 +320,21 @@ function replayedAssistant(message: HarnessAssistantMessage, source: ModelMessag
  * @param message - model-produced assistant content with provider, model, and optional adapter-owned replay metadata.
  * @param onDegrade - called with the diagnostic reason when an unusable replay
  *   state falls back to provider-neutral conversion.
+ * @param expectedPrefixDigest - digest of the normalized request prefix that
+ *   precedes this assistant; stored usage is restored only when it matches the
+ *   envelope's own prefixDigest, otherwise zero usage keeps pi-ai estimation
+ *   anchored on nothing rather than stale numbers.
  * @returns a native pi-ai assistant message reconstructed from durable content.
  */
-export function toPiAssistant(message: HarnessAssistantMessage, onDegrade?: (reason: string) => void): AssistantMessage {
+export function toPiAssistant(
+  message: HarnessAssistantMessage,
+  onDegrade?: (reason: string) => void,
+  expectedPrefixDigest?: string,
+): AssistantMessage {
   const source = message.source
   if (source.replayState === undefined) return foreignAssistant(message)
   try {
-    return replayedAssistant(message, source, source.replayState)
+    return replayedAssistant(message, source, source.replayState, expectedPrefixDigest)
   } catch (error: unknown) {
     /* v8 ignore next -- replayedAssistant throws only INVALID_REPLAY_STATE LlmErrors; the
        guard keeps a future non-replay failure loud instead of silently degrading it */

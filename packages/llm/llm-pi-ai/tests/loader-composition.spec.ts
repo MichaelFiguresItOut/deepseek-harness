@@ -216,7 +216,7 @@ describe('llm-pi-ai real dormant composition', () => {
     })
     expect(truncated.finish).toEqual({ kind: 'max-tokens' })
     expect(truncated.message.content).toEqual([{ type: 'text', text: 'partial' }])
-    expect(truncated.message.source).toEqual({
+    expect(truncated.message.source).toMatchObject({
       kind: 'model',
       provider: 'deepseek',
       model: 'deepseek-flash',
@@ -228,10 +228,15 @@ describe('llm-pi-ai real dormant composition', () => {
           provider: 'deepseek',
           model: 'deepseek-flash',
           stopReason: 'length',
+          usage: { input: 3, output: 4, cacheRead: 0, cacheWrite: 0, totalTokens: 7 },
         },
         blocks: [{ type: 'text' }],
       },
     })
+    // The digest covers this request's context; its value depends on the canonical serialization,
+    // so assert shape here and matching/mismatch semantics in convert.spec.ts.
+    const response = (truncated.message.source as { replayState: { response: { prefixDigest?: unknown } } }).replayState.response
+    expect(response.prefixDigest).toMatch(/^[0-9a-f]{64}$/)
 
     const continued = await assemble(ctx, {
       provider: 'deepseek',

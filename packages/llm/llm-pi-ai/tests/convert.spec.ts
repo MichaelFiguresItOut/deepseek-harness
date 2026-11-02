@@ -3,10 +3,12 @@ import { AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore, ImageAttachmentRef, ImageRequestTarget, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { createToolResultMessage, createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
-import type { AssistantMessage, AssistantMessageEvent, Usage } from '@earendil-works/pi-ai'
+import type { AssistantMessage, AssistantMessageEvent, Context, Usage } from '@earendil-works/pi-ai'
 import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
-import { toPiContext } from '../src/context.ts'
+import { estimateContextTokens } from '@earendil-works/pi-ai/utils/estimate'
+import { normalizeContext } from '@earendil-works/pi-ai/utils/transcript'
+import { piPrefixDigest, toPiContext } from '../src/context.ts'
 import { toPiReplayState } from '../src/replay.ts'
 import { mapStopReason, mapUsage, toStreamChunks } from '../src/stream.ts'
 
@@ -1019,5 +1021,164 @@ describe('toStreamChunks defensive branches', () => {
       { type: 'done', reason: 'stop', message: assistant() },
     )))
     expect(chunks[0]).toEqual({ type: 'tool-call-delta', index: 0, id: '', argumentsDelta: '{}' })
+  })
+})
+
+describe('provider usage preservation with prefix digests', () => {
+  function user(text: string) {
+    return createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+  }
+
+  function replayedAssistant(replayState: unknown, text = 'done') {
+    return createMessage({
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      source: { kind: 'model', provider: 'deepseek', model: 'm1', replayState },
+    })
+  }
+
+  const options = { provider: 'deepseek', model: 'm1' } as const
+
+  function capturedState(nativeText: string, storedUsage: Usage, prefixContext: Context) {
+    return toPiReplayState(assistant({ usage: storedUsage, content: [{ type: 'text', text: nativeText }] }), 'm1', {
+      usage: storedUsage,
+      prefixDigest: piPrefixDigest(prefixContext),
+    })
+  }
+
+  it('stores captured usage and prefix digest in the finish chunk and restores them after a JSON round trip', async () => {
+    const request = user('hello')
+    const storedUsage = usage(5, 3)
+    const digest = piPrefixDigest(toPiContext({ ...options, system: 'be brief', messages: [request] }))
+
+    const chunks = await collect(toStreamChunks(feed({ type: 'done', reason: 'stop', message: assistant({ usage: storedUsage, content: [{ type: 'text', text: 'hi' }] }) }), undefined, undefined, 'm1', digest))
+    const finish = chunks.find(chunk => chunk.type === 'finish')
+    expect(finish?.type).toBe('finish')
+    if (finish?.type !== 'finish' || finish.replayState === undefined) throw new Error('missing replay state on finish chunk')
+
+    const persisted: { response: Record<string, unknown> } = JSON.parse(JSON.stringify(finish.replayState))
+    expect(persisted.response.usage).toEqual(storedUsage)
+    expect(persisted.response.prefixDigest).toBe(digest)
+
+    const onDegrade = vi.fn()
+    const context = toPiContext({ ...options, system: 'be brief', messages: [request, replayedAssistant(persisted)] }, undefined, onDegrade)
+    expect(onDegrade).not.toHaveBeenCalled()
+    expect((context.messages[1] as AssistantMessage).usage).toEqual(storedUsage)
+  })
+
+  it('restores provider usage when the replayed prefix digest matches', () => {
+    const request = user('hello')
+    const storedUsage = usage(50, 25)
+    const state = capturedState('native answer', storedUsage, toPiContext({ ...options, system: 'be brief', messages: [request] }))
+
+    const onDegrade = vi.fn()
+    const context = toPiContext({ ...options, system: 'be brief', messages: [request, replayedAssistant(state)] }, undefined, onDegrade)
+    expect(onDegrade).not.toHaveBeenCalled()
+    expect((context.messages[1] as AssistantMessage).usage).toEqual(storedUsage)
+  })
+
+  it('does not restore usage when the replayed system prompt differs', () => {
+    const request = user('hello')
+    const state = capturedState('native answer', usage(50, 25), toPiContext({ ...options, system: 'be brief', messages: [request] }))
+
+    const onDegrade = vi.fn()
+    const context = toPiContext({ ...options, system: 'be verbose', messages: [request, replayedAssistant(state)] }, undefined, onDegrade)
+    expect(onDegrade).not.toHaveBeenCalled()
+    expect((context.messages[1] as AssistantMessage).usage).toEqual(usage())
+  })
+
+  it('does not restore usage when an earlier message was edited', () => {
+    const state = capturedState('native answer', usage(50, 25), toPiContext({ ...options, system: 'be brief', messages: [user('hello')] }))
+
+    const onDegrade = vi.fn()
+    const context = toPiContext({ ...options, system: 'be brief', messages: [user('hello!'), replayedAssistant(state)] }, undefined, onDegrade)
+    expect(onDegrade).not.toHaveBeenCalled()
+    expect((context.messages[1] as AssistantMessage).usage).toEqual(usage())
+  })
+
+  it('invalidates usage when compaction replaces the captured prefix', () => {
+    const userA = user('hello')
+    const userB = user('second question')
+    const stored1 = usage(10, 5)
+    const state1 = capturedState('first answer', stored1, toPiContext({ ...options, system: 'be brief', messages: [userA] }))
+
+    // Turn 2's request prefix includes the first answer with its restored usage.
+    const turn2 = toPiContext({ ...options, system: 'be brief', messages: [userA, replayedAssistant(state1), userB] })
+    expect((turn2.messages[1] as AssistantMessage).usage).toEqual(stored1)
+
+    const stored2 = usage(40, 8)
+    const state2 = capturedState('second answer', stored2, turn2)
+
+    // Compaction replaces the first exchange with a summary.
+    const onDegrade = vi.fn()
+    const context = toPiContext({ ...options, system: 'be brief', messages: [user('[summary of earlier conversation]'), userB, replayedAssistant(state2)] }, undefined, onDegrade)
+    expect(onDegrade).not.toHaveBeenCalled()
+    expect((context.messages[2] as AssistantMessage).usage).toEqual(usage())
+  })
+
+  it('keeps legacy envelopes without usage or digest functional', () => {
+    const state = toPiReplayState(assistant({ content: [{ type: 'text', text: 'done' }] }), 'm1')
+    expect(state.response).not.toHaveProperty('usage')
+    expect(state.response).not.toHaveProperty('prefixDigest')
+
+    const onDegrade = vi.fn()
+    const context = toPiContext({ ...options, messages: [user('hello'), replayedAssistant(state)] }, undefined, onDegrade)
+    expect(onDegrade).not.toHaveBeenCalled()
+    expect((context.messages[1] as AssistantMessage).usage).toEqual(usage())
+  })
+
+  function malformedEnvelope(mutate: (response: Record<string, unknown>) => void) {
+    const response: Record<string, unknown> = {
+      kind: 'pi-ai',
+      version: 2,
+      api: 'openai-completions',
+      provider: 'deepseek',
+      model: 'm1',
+      stopReason: 'stop',
+      usage: usage(50, 25),
+      prefixDigest: 'a'.repeat(64),
+    }
+    mutate(response)
+    return { response, blocks: [{ type: 'text' }] }
+  }
+
+  const malformedCases: Array<[string, (response: Record<string, unknown>) => void]> = [
+    ['usage.input is not a number', (response) => { (response.usage as Record<string, unknown>).input = 'x' }],
+    ['usage.totalTokens is missing', (response) => { delete (response.usage as Record<string, unknown>).totalTokens }],
+    ['usage.cost is not an object', (response) => { (response.usage as Record<string, unknown>).cost = 42 }],
+    ['prefixDigest is empty', (response) => { response.prefixDigest = '' }],
+    ['prefixDigest is not a string', (response) => { response.prefixDigest = 123 }],
+    ['usage present but prefixDigest missing', (response) => { delete response.prefixDigest }],
+  ]
+
+  it.each(malformedCases)('fails safely when %s', (_label, mutate) => {
+    const state = malformedEnvelope(mutate)
+    const onDegrade = vi.fn()
+    const context = toPiContext({ ...options, messages: [user('hello'), replayedAssistant(state)] }, undefined, onDegrade)
+    expect(onDegrade).not.toHaveBeenCalled()
+    const assistantMessage = context.messages[1] as AssistantMessage
+    expect(assistantMessage.content).toEqual([{ type: 'text', text: 'done' }])
+    expect(assistantMessage.usage).toEqual(usage())
+  })
+
+  it('restored usage anchors pi-ai context estimation instead of the character fallback', () => {
+    const request = user('hello')
+    const storedUsage = usage(1000, 500)
+    const matching = capturedState('short answer', storedUsage, toPiContext({ ...options, messages: [request] }))
+    const trailing = user('world')
+
+    // The durable content mirrors what was actually streamed, so the character fallback in the
+    // stale case counts 'short answer', not a placeholder.
+    const anchored = estimateContextTokens(normalizeContext(toPiContext({ ...options, messages: [request, replayedAssistant(matching, 'short answer'), trailing] })))
+    expect(anchored.usageTokens).toBe(1500)
+    expect(anchored.lastUsageIndex).toBe(1)
+    expect(anchored.trailingTokens).toBe(Math.ceil('world'.length / 3.5))
+    expect(anchored.tokens).toBe(1500 + Math.ceil('world'.length / 3.5))
+
+    const stale = capturedState('short answer', storedUsage, toPiContext({ ...options, system: 'different prompt', messages: [request] }))
+    const unanchored = estimateContextTokens(normalizeContext(toPiContext({ ...options, messages: [request, replayedAssistant(stale, 'short answer'), trailing] })))
+    expect(unanchored.usageTokens).toBe(0)
+    expect(unanchored.lastUsageIndex).toBeNull()
+    expect(unanchored.tokens).toBe(Math.ceil('hello'.length / 3.5) + Math.ceil('short answer'.length / 3.5) + Math.ceil('world'.length / 3.5))
   })
 })

@@ -15,7 +15,8 @@ import type {
   RequestImageAttachment,
 } from '@deepseek-ai/dsh-attachment'
 import type { Context as PiContext, ImageContent, Message as PiMessage, SystemMessage, TextContent, Tool as PiTool } from '@earendil-works/pi-ai'
-import { toPiAssistant } from './replay.ts'
+import { createHash } from 'node:crypto'
+import { replayStateCarriesUsage, toPiAssistant } from './replay.ts'
 import { requestImageDimensions } from '@deepseek-ai/dsh-attachment'
 import { DEFAULT_REQUEST_IMAGE_MAX_BYTES, DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET } from './config.ts'
 
@@ -167,6 +168,22 @@ function piContext(systemPrompt: string | undefined, options: GenerateOptions, m
   }
 }
 
+/**
+ * Canonical SHA-256 digest of a request-level pi-ai context envelope. The fixed-key-order
+ * serialization mirrors `piContext`'s omissions exactly, so two envelopes that are field-for-field
+ * equal produce identical digests and any difference in system prompt, message content (including
+ * restored usage), or tool declarations changes it. Used both when capturing provider-reported
+ * usage and when checking replay restoration, guaranteeing an identical serialization path on both sides.
+ */
+export function piPrefixDigest(context: PiContext): string {
+  const canonical = JSON.stringify({
+    systemPrompt: context.systemPrompt === undefined ? null : context.systemPrompt,
+    messages: context.messages,
+    tools: context.tools === undefined || context.tools.length === 0 ? null : context.tools,
+  })
+  return createHash('sha256').update(canonical).digest('hex')
+}
+
 /** Keep one developer event in one system update, resolving its projected tool declarations. */
 function appendDeveloper(message: Extract<Message, { role: 'developer' }>, options: GenerateOptions, messages: PiMessage[]): void {
   const content: TextContent[] = []
@@ -204,9 +221,17 @@ function appendAssistant(
   message: Extract<Message, { role: 'assistant' }>,
   messages: PiMessage[],
   toolNames: Map<ToolCallId, string>,
+  systemPrompt: string | undefined,
+  options: GenerateOptions,
   onReplayDegrade?: (reason: string) => void,
 ): void {
-  const assistant = toPiAssistant(message, onReplayDegrade)
+  // The prefix digest covers exactly the normalized context pi-ai will see for this assistant's
+  // request — everything before it. It is computed before push so that the response being restored
+  // never enters its own anchor.
+  const expectedPrefixDigest = replayStateCarriesUsage(message.source.replayState)
+    ? piPrefixDigest(piContext(systemPrompt, options, messages))
+    : undefined
+  const assistant = toPiAssistant(message, onReplayDegrade, expectedPrefixDigest)
   for (const block of assistant.content) {
     if (block.type === 'toolCall') toolNames.set(brandString<ToolCallId>(block.id), block.name)
   }
@@ -220,6 +245,7 @@ function appendSharedHistory(
   messages: PiMessage[],
   toolNames: Map<ToolCallId, string>,
   supportsMidConvoSystemMessages: boolean,
+  systemPrompt: string | undefined,
   onReplayDegrade?: (reason: string) => void,
 ): boolean {
   if (message.role === 'developer') {
@@ -239,7 +265,7 @@ function appendSharedHistory(
     return true
   }
   if (message.role === 'assistant') {
-    appendAssistant(message, messages, toolNames, onReplayDegrade)
+    appendAssistant(message, messages, toolNames, systemPrompt, options, onReplayDegrade)
     return true
   }
   return false
@@ -258,7 +284,16 @@ function textOnlyContext(
     if (contentHasImage(message.content)) {
       throw new LlmError('pi-ai image conversion requires the durable attachment service', 'UNSUPPORTED_CONTENT')
     }
-    if (appendSharedHistory(message, options, messages, toolNames, supportsMidConvoSystemMessages, onReplayDegrade)) continue
+    const handled = appendSharedHistory(
+      message,
+      options,
+      messages,
+      toolNames,
+      supportsMidConvoSystemMessages,
+      split.systemPrompt,
+      onReplayDegrade,
+    )
+    if (handled) continue
     if (message.role === 'tool') {
       messages.push(toolResultOf(message, toolNames, flattenText(message)))
       continue
@@ -380,7 +415,16 @@ async function toPiContextWithImages(
   const messages: PiMessage[] = []
 
   for (const message of exactMessages) {
-    if (appendSharedHistory(message, options, messages, toolNames, supportsMidConvoSystemMessages, onReplayDegrade)) continue
+    const handled = appendSharedHistory(
+      message,
+      options,
+      messages,
+      toolNames,
+      supportsMidConvoSystemMessages,
+      split.systemPrompt,
+      onReplayDegrade,
+    )
+    if (handled) continue
     if (message.role === 'tool') {
       messages.push(toolResultOf(message, toolNames, userContent(message.content, requestImages, resolveImageAccess)))
       continue
