@@ -1,4 +1,4 @@
-# DSH (Compaction Fixes Fork)
+# DSH Compaction Fix Fork
 
 **Important Notice:** This is an independent fork of the [original DSH repository](https://github.com/deepseek-ai/deepseek-harness) by [MichaelFiguresItOut](https://www.youtube.com/@MichaelFiguresItOut). Original Read.me info further below.
 
