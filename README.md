@@ -1,7 +1,69 @@
-# DeepSeek Harness
+# DSH (Compaction Fixes Fork)
 
-> [!NOTE]
-> **Fork:** This repository is a fork of [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness), maintained by [MichaelFiguresItOut](https://github.com/MichaelFiguresItOut).
+**Important Notice:** This is an independent fork of the [original DSH repository](https://github.com/deepseek-ai/deepseek-harness) by [MichaelFiguresItOut](https://www.youtube.com/@MichaelFiguresItOut). Original Read.me info further below.
+
+Because the upstream DSH project does not accept GitHub Pull Requests, this repository was created to share this fix with the community.
+
+* **Base Version:** Forked on November 2, 2026 from upstream master at commit [`ce7073d512`](https://github.com/deepseek-ai/deepseek-harness/commit/ce7073d512) (October 30, 2026). All fixes were committed November 2–3, 2026.
+* **Primary Changes:** Adds reliability and performance fixes to the compaction process: provider-reported token usage now survives session replay, reasoning-only messages are priced correctly on routes that drop them from later requests, and truncated compaction summaries fail closed instead of being checkpointed — with summarizer reasoning disabled where the model allows it.
+
+## Issues encountered / bugs discovered
+
+All three issues were observed while running DSH against a local reasoning model served through an OpenAI-compatible endpoint (LM Studio) on the `openai-completions` route, and each was reproduced in the session journal before being fixed.
+
+### 1. Compaction summaries silently truncated — reliability bug
+Compaction repeatedly failed with `summarization truncated at the token cap` (ten consecutive failures were recorded in a single session). Two root causes:
+
+- **No post-stream guard.** When a provider ended the summarization stream exactly at the output cap *without* reporting a max-tokens finish reason, the harness treated the response as successful and checkpointed the incomplete summary as if it were complete — corrupting the compacted history for every subsequent turn.
+- **Reasoning ate the summary budget.** Models that think by default spent part of the summarizer's output-token budget on reasoning tokens before producing any summary text, making truncation far more likely on exactly the models where compaction matters most.
+
+### 2. Provider-reported token usage lost across session replay — accounting bug
+The pi-ai adapter's durable replay state stored each assistant turn's content and stop reason but dropped the provider-reported `usage` record. After a session was resumed, the harness had to re-estimate those tokens heuristically, so its view of conversation size drifted from what the provider actually reported — making compaction trigger at the wrong time (too late, handing the summarizer an oversized input; or too early).
+
+### 3. Spurious double-compaction on reasoning models — performance bug
+The `openai-completions` serializer omits assistant messages that carry no text and no tool calls, so a reasoning-only message never reaches the provider again on later turns. The token meter nevertheless carried its *full* usage total (prompt + output) forward as the baseline for context size — inflating estimates by exactly the tokens the provider would never re-bill, and triggering compaction more often than necessary (sometimes twice in a row with nothing new to say).
+
+## Detailed changes (commit by commit)
+
+### 1. [`c26591abbf`](https://github.com/MichaelFiguresItOut/deepseek-harness/commit/c26591abbf) — Preserve provider-reported token usage in pi-ai replay state
+*Files: `packages/llm/llm-pi-ai/src/{adapter,context,replay,stream}.ts` + tests (+323/−17)*
+
+The normalized provider usage is now stored **verbatim** on the replay response (`PiAiReplayResponse.usage`) alongside a SHA-256 digest of the exact normalized request prefix (system prompt, messages, tools) that produced it. On replay, the digest for the assistant's preceding context is recomputed and usage is restored **only when it matches**; missing, malformed, or mismatched pairs degrade to zero usage so estimation never anchors on stale numbers. Stored records are validated field-by-field without normalization (forward-compatible fields survive), and legacy envelopes without the pair keep working unchanged.
+
+### 2. [`ea2855fc2f`](https://github.com/MichaelFiguresItOut/deepseek-harness/commit/ea2855fc2f) — Price reasoning-only messages by prompt side when routes drop them
+*Files: `packages/llm/{llm,token-meter,llm-pi-ai}` + docs (+378/−11)*
+
+Adds an `LlmAdapter.omitsReasoningOnlyAssistantMessages` hook (default `false`, with `LlmRuntime` delegation). `PiAiAdapter` answers `true` only for the `openai-completions` API unless the model requires thinking as text, so routes that send reasoning on the wire keep full-total accounting. The token meter records a `reasoningOnly` flag on usage anchors and, when the routed model's route drops such messages, baselines from **provider usage minus output tokens** (prompt side), falling back to a prompt-side estimate when reported usage is too low to trust. Surface deltas are unchanged, so the dropped node's own price cancels out of later measurements. Measurement `stateVersion` bumps to 3; mismatched checkpoints replay instead of mispricing.
+
+### 3. [`fcc63e543a`](https://github.com/MichaelFiguresItOut/deepseek-harness/commit/fcc63e543a) — Detect truncated compaction summaries and skip summarizer reasoning
+*Files: `packages/compaction/compaction-basic/src/summarizer.ts` + tests (+126/−4)*
+
+Two fixes in the summarizer:
+
+- **Reasoning off where possible.** Summarization requests now ask for the model's *off* reasoning effort when its resolved metadata offers one; models without selectable efforts keep their existing behavior (no thinking control is sent).
+- **Fail closed on truncation.** One shared truncation error covers both the max-tokens finish case and a new post-stream guard: a success-kind finish whose reported output tokens reach the configured cap now fails compaction with `compaction/summary-error` instead of checkpointing an incomplete summary.
+
+### 4. [`e1986442af`](https://github.com/MichaelFiguresItOut/deepseek-harness/commit/e1986442af) — Disable reasoning for compaction without changing normal turns
+*Files: `packages/llm/llm-pi-ai/src/adapter.ts` + tests (+113/−1)*
+
+Makes fix 3's "off effort" actually reach the wire on `openai-completions` routes without touching anything else. The adapter's model handoff now gates on route + explicit effort: with **no** reasoning effort requested, pi-ai receives `{...model, reasoning:false}` so no thinking control is sent at all — normal turns are byte-identical to upstream. With an **explicit** effort (e.g., the summarizer's `off`), the declared model is preserved and pi-ai sends the route's wire spelling (`"none"` / `"minimal"`).
+
+## What this fork does not change
+- Normal (non-compaction) turns: identical wire payloads to upstream on every route.
+- Routes that keep reasoning content on the wire: full-total usage accounting unchanged.
+- Models without selectable reasoning efforts: summarizer behavior unchanged.
+- Legacy replay envelopes: read and written exactly as before when no usage pair is present.
+
+## Verification
+- `packages/llm` full suite: **1739/1739** passing (includes new suites for replay usage preservation, reasoning-only pricing ×7, and the pi-ai hook ×5)
+- `compaction-basic`: **174/174** passing (new regression tests for truncation detection at/over budget, missing terminal finish chunks, and effort routing)
+- Focused regression run across all touched packages: **89/89**
+- Typecheck: all 5 repository gates pass
+- Live end-to-end against a local reasoning model (LM Studio): real compaction **2/2**, confirming the endpoint accepts `role:"developer"` and the `"none"` effort wire spelling
+
+---
+
+# DeepSeek Harness
 
 English | [中文](README.zh.md)
 
