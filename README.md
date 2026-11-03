@@ -4,12 +4,12 @@
 
 Because the upstream DSH project does not accept GitHub Pull Requests, this repository was created to share this fix with the community.
 
-* **Base Version:** Forked on November 2, 2026 from upstream master at commit [`ce7073d512`](https://github.com/deepseek-ai/deepseek-harness/commit/ce7073d512) (October 30, 2026). All fixes were committed November 2–3, 2026.
-* **Primary Changes:** Adds reliability and performance fixes to the compaction process: provider-reported token usage now survives session replay, reasoning-only messages are priced correctly on routes that drop them from later requests, and truncated compaction summaries fail closed instead of being checkpointed — with summarizer reasoning disabled where the model allows it.
+* **Base Version:** Forked on November 2, 2026 from upstream master at commit [`ce7073d512`](https://github.com/deepseek-ai/deepseek-harness/commit/ce7073d512) (October 30, 2026). All fixes were committed November 3, 2026.
+
+##  Summary
+Compaction issues arose while running DSH against a local reasoning model ([unsloth/Qwen3.8 27B GGUF UD-IQ4-XS](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF)) served through an OpenAI-compatible endpoint (LM Studio) on the `openai-completions` route. Forked DSH and added these reliability and performance fixes to the compaction process: provider-reported token usage now survives session replay, reasoning-only messages are priced correctly on routes that drop them from later requests, and truncated compaction summaries fail closed instead of being checkpointed — with summarizer reasoning disabled where the model allows it.
 
 ## Issues encountered / bugs discovered
-
-All three issues were observed while running DSH against a local reasoning model served through an OpenAI-compatible endpoint (LM Studio) on the `openai-completions` route, and each was reproduced in the session journal before being fixed.
 
 ### 1. Compaction summaries silently truncated — reliability bug
 Compaction repeatedly failed with `summarization truncated at the token cap` (ten consecutive failures were recorded in a single session). Two root causes:
