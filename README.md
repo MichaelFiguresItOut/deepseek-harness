@@ -1,5 +1,8 @@
 # DeepSeek Harness
 
+> [!NOTE]
+> **Fork:** This repository is a fork of [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness), maintained by [MichaelFiguresItOut](https://github.com/MichaelFiguresItOut).
+
 English | [中文](README.zh.md)
 
 DeepSeek Harness (`dsh`) is an open-source agent harness developed by [DeepSeek AI](https://deepseek.com).
