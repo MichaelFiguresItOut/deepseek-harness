@@ -479,7 +479,16 @@ export class PiAiAdapter extends LlmAdapter {
       // Digest the exact envelope pi-ai will normalize for this request so a later replay of an
       // identical prefix can restore this response's provider-reported usage.
       const prefixDigest = piPrefixDigest(context)
-      const events = snapshot.models.streamSimple(model, context, {
+      // A request that never selected a reasoning effort must reach the wire exactly as before.
+      // Declaring reasoningEfforts on an openai-completions model would otherwise make pi-ai's
+      // no-effort branch emit the declared off value and flip system messages to the developer
+      // role on every normal turn; masking reasoning keeps those turns byte-identical. Other
+      // routes keep their pinned default-off semantics untouched. An explicit selection
+      // (including 'off', which the compaction summarizer uses to opt out of thinking) keeps the
+      // declared model so its wire spelling is sent.
+      const wireModel =
+        reasoning === undefined && model.api === 'openai-completions' ? { ...model, reasoning: false } : model
+      const events = snapshot.models.streamSimple(wireModel, context, {
         ...profileOptions(profile, reasoning, apiKey),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
