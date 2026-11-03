@@ -238,6 +238,22 @@ export abstract class LlmAdapter {
   }
 
   /**
+   * Whether this route omits assistant messages that carry only reasoning from
+   * subsequent provider requests. The default is false: the route retains
+   * reasoning content on the wire, so carrying a call's full usage total
+   * forward stays correct even when its output was reasoning-only.
+   * Implementations must answer synchronously without I/O; the token meter
+   * resolves this per measurement and degrades to `false` for routes that are
+   * no longer mounted.
+   * @param _provider - a route passed to `registerAdapter()` for this instance.
+   * @param _model - exact model id passed to {@link GenerateOptions.model}.
+   * @returns true only when reasoning-only assistant messages drop out of later requests.
+   */
+  omitsReasoningOnlyAssistantMessages(_provider: string, _model: string): boolean {
+    return false
+  }
+
+  /**
    * Resolve the image dimensions and byte target this adapter sends to the model.
    * The default preserves normalized images; adapters that resize must override it.
    * @param _provider - registered provider route.
@@ -680,6 +696,20 @@ export class LlmRuntime extends TypertRemoteService {
    */
   imageRequestPricing(provider: string, model: string): LlmImageRequestPricing | undefined {
     return this.adapters.get(provider)?.adapter.imageRequestPricing(provider, model)
+  }
+
+  /**
+   * Resolve whether one exact route omits reasoning-only assistant messages
+   * from subsequent provider requests. Unknown providers degrade to `false`
+   * rather than throwing because callers price durable history whose route may
+   * no longer be mounted; the conservative default keeps carrying full usage
+   * totals for unresolvable routes.
+   * @param provider - provider route named by a request header.
+   * @param model - exact model id named by the same header.
+   * @returns whether the owning adapter's serializer drops reasoning-only assistant messages.
+   */
+  omitsReasoningOnlyAssistantMessages(provider: string, model: string): boolean {
+    return this.adapters.get(provider)?.adapter.omitsReasoningOnlyAssistantMessages(provider, model) ?? false
   }
 
   /**

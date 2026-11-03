@@ -27,6 +27,7 @@ const measurementStateSchema = z.object({
     headerSeq: seqSchema.nullable(),
     assistantTokens: countSchema,
     usage: usageSchema.nullable(),
+    reasoningOnly: z.boolean(),
   }).strict().nullable(),
   invalidSeq: seqSchema.nullable(),
 }).strict()
@@ -66,15 +67,20 @@ export function advanceMeasurement(state: MeasurementState, event: SessionEvent)
       }
       let assistantTokens: number
       let usage: TokenUsage | null = null
+      let reasoningOnly = false
       if (event.data.usage !== undefined && state.headerSeq !== null) {
         const content = assembleAssistantStream(event.data.stream).blocks()
         assistantTokens = content.length === 0 ? 0 : estimateContent(content) + ROLE_OVERHEAD
         usage = event.data.usage
+        reasoningOnly = content.length > 0 && content.every(block => block.type === 'reasoning')
       } else {
         const message = deriveEventMessage(event)
         assistantTokens = message === null ? 0 : estimateMessage(message)
+        reasoningOnly = message !== null
+          && message.content.length > 0
+          && message.content.every(block => block.type === 'reasoning')
       }
-      return { ...state, anchor: { headerSeq: state.headerSeq, assistantTokens, usage } }
+      return { ...state, anchor: { headerSeq: state.headerSeq, assistantTokens, usage, reasoningOnly } }
     }
     default:
       return state
@@ -84,7 +90,7 @@ export function advanceMeasurement(state: MeasurementState, event: SessionEvent)
 /** Host-only measurement facts, independent of session and surface length. */
 export const measurementProjectionDefinition = {
   key: 'tokenMeasurement',
-  stateVersion: 2,
+  stateVersion: 3,
   stateSchema: measurementStateSchema,
   init: (): MeasurementState => ({ headerSeq: null, stepStart: null, anchor: null, invalidSeq: null }),
   apply: (state, event) => {

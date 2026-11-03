@@ -1113,6 +1113,18 @@ providerRetryPolicy(provider: string): ResolvedRetryPolicy
 imageRequestPricing(provider: string, model: string): LlmImageRequestPricing | undefined
 
 /**
+ * Resolve whether one exact route omits reasoning-only assistant messages
+ * from subsequent provider requests. Unknown providers degrade to `false`
+ * rather than throwing because callers price durable history whose route may
+ * no longer be mounted; the conservative default keeps carrying full usage
+ * totals for unresolvable routes.
+ * @param provider - provider route named by a request header.
+ * @param model - exact model id named by the same header.
+ * @returns whether the owning adapter's serializer drops reasoning-only assistant messages.
+ */
+omitsReasoningOnlyAssistantMessages(provider: string, model: string): boolean
+
+/**
  * Resolve the image projection for an exact registered model route.
  * @param provider - registered provider route.
  * @param model - exact model id.

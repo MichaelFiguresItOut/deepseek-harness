@@ -285,6 +285,27 @@ export class PiAiAdapter extends LlmAdapter {
   }
 
   /**
+   * openai-completions serialization drops assistant messages that carry no
+   * text content and no tool calls, so a reasoning-only message never reaches
+   * the provider again and its completion tokens must not be carried forward.
+   * Routes that send thinking as ordinary text retain the message on the wire;
+   * unresolvable routes degrade to `false` because durable history may outlive
+   * configuration changes.
+   */
+  override omitsReasoningOnlyAssistantMessages(provider: string, model: string): boolean {
+    try {
+      const snapshot = this.current()
+      const resolved = this.modelOf(snapshot, provider, model)
+      if (resolved.api !== 'openai-completions') return false
+      // `compat` is a union across protocols; only the completions member carries the flag.
+      const compat = resolved.compat
+      return !(compat !== undefined && 'requiresThinkingAsText' in compat && compat.requiresThinkingAsText === true)
+    } catch (_error) {
+      return false
+    }
+  }
+
+  /**
    * The snapshot for the current profiles. Resolution memoizes its result, so
    * an unchanged configuration is recognized by identity; a changed one gets a
    * brand-new collection, leaving any snapshot an operation already captured

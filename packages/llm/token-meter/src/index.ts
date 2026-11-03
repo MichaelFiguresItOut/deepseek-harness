@@ -168,11 +168,22 @@ export class TokenMeter extends Service {
         + anchor.assistantTokens
       const estimatedAnchorTokens = estimateToolsTokens(header) + anchorSurfaceTokens
       const usage = anchor.usage
-      // Signed heuristic deltas remain conservative only from an anchor
-      // that is at least as large as the matching full heuristic price.
-      baseline = usage !== null && usageTokens(usage) >= estimatedAnchorTokens
-        ? { kind: 'usage', tokens: usageTokens(usage), usage }
-        : { kind: 'estimated', tokens: estimatedAnchorTokens }
+      if (this._routeOmitsReasoningOnly(header) && anchor.reasoningOnly) {
+        // The route drops this message from later requests, so its completion
+        // tokens are never resent: price the prompt side only. The delta still
+        // subtracts the full anchored surface, keeping the dropped node's own
+        // heuristic price out of the total.
+        const promptSideEstimate = estimatedAnchorTokens - anchor.assistantTokens
+        baseline = usage !== null && usageTokens(usage) - usage.outputTokens >= promptSideEstimate
+          ? { kind: 'usage', tokens: usageTokens(usage) - usage.outputTokens, usage }
+          : { kind: 'estimated', tokens: promptSideEstimate }
+      } else {
+        // Signed heuristic deltas remain conservative only from an anchor
+        // that is at least as large as the matching full heuristic price.
+        baseline = usage !== null && usageTokens(usage) >= estimatedAnchorTokens
+          ? { kind: 'usage', tokens: usageTokens(usage), usage }
+          : { kind: 'estimated', tokens: estimatedAnchorTokens }
+      }
       surfaceDeltaTokens = surface.surfaceTokens - anchorSurfaceTokens
     } else if (header === undefined && surface.surfaceTokens === 0) {
       baseline = { kind: 'none', tokens: 0 }
@@ -200,6 +211,13 @@ export class TokenMeter extends Service {
     const config = header?.config
     if (config === undefined) return undefined
     return this.ctx.get('llm')?.imageRequestPricing(config.provider, config.model)
+  }
+
+  /** Resolve whether the routed model's route omits reasoning-only assistant messages from later requests. */
+  private _routeOmitsReasoningOnly(header: EpochHeader | undefined): boolean {
+    const config = header?.config
+    if (config === undefined) return false
+    return this.ctx.get('llm')?.omitsReasoningOnlyAssistantMessages(config.provider, config.model) ?? false
   }
 
   /** Resolve request-time file projection when an LLM service is mounted. */

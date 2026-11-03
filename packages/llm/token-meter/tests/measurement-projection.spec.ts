@@ -163,7 +163,7 @@ describe('measurement recovery facts', () => {
     expect(JSON.stringify(state).length).toBeLessThan(200)
     expect(state).toEqual({
       headerSeq: 2, stepStart: null, invalidSeq: null,
-      anchor: { headerSeq: 2, assistantTokens: 0, usage: { inputTokens: 1000, outputTokens: 10 } },
+      anchor: { headerSeq: 2, assistantTokens: 0, usage: { inputTokens: 1000, outputTokens: 10 }, reasoningOnly: false },
     })
   })
 
@@ -185,7 +185,7 @@ describe('measurement recovery facts', () => {
     expect(measurementProjectionDefinition.stateSchema.safeParse({ ...init, surface: [] }).success).toBe(false)
     expect(measurementProjectionDefinition.stateSchema.safeParse({ ...init, headerSeq: -1 }).success).toBe(false)
     const usage = { inputTokens: 10, outputTokens: 2, totalTokens: 12, cacheReadTokens: 3, cacheWriteTokens: 4, reasoningTokens: 1 }
-    const state = { ...init, anchor: { headerSeq: null, assistantTokens: 0, usage } }
+    const state = { ...init, anchor: { headerSeq: null, assistantTokens: 0, usage, reasoningOnly: false } }
     expect(measurementProjectionDefinition.stateSchema.parse(state)).toEqual(state)
   })
 
