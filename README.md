@@ -9,6 +9,59 @@ Because the upstream DSH project does not accept GitHub Pull Requests, this repo
 ##  Summary
 Compaction issues arose while running DSH against a local reasoning model ([unsloth/Qwen3.8 27B GGUF UD-IQ4-XS](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF)) served through an OpenAI-compatible endpoint (LM Studio) on the `openai-completions` route. Forked DSH and added these reliability and performance fixes to the compaction process: provider-reported token usage now survives session replay, reasoning-only messages are priced correctly on routes that drop them from later requests, and truncated compaction summaries fail closed instead of being checkpointed — with summarizer reasoning disabled where the model allows it.
 
+## Installing this fork
+
+### From scratch (no existing DSH)
+
+Prerequisites: [Node.js](https://nodejs.org/) **24.9 or newer** and pnpm (this repo pins pnpm 11.28.5 via its `packageManager` field):
+
+```sh
+# one-time setup
+npm install -g pnpm@11.28.5
+```
+
+Then clone this fork and build it. The bundled dependency patches are applied automatically during install — no manual steps:
+
+```sh
+git clone https://github.com/MichaelFiguresItOut/deepseek-harness.git dsh-fork
+cd dsh-fork
+pnpm install
+pnpm run build
+pnpm dsh web
+```
+
+Note: the upstream quick start (`npx @deepseek-ai/dsh web`) installs the **upstream** package from npm, not this fork. Use the steps above to get the compaction fixes.
+
+### Keeping your current settings
+
+DSH keeps all user state — settings, profiles, API keys (`.env`), and session history — in `~/.dsh` on macOS/Linux or `%USERPROFILE%\.dsh` on Windows (overridable with the `DSH_HOME` environment variable). That folder lives **outside** any repository checkout, so installing this fork never touches it.
+
+To move an existing install over to this fork without losing anything:
+
+1. Leave your `.dsh` folder exactly where it is — do not delete or overwrite it.
+2. Clone this fork into a new directory (next to your current setup is fine):
+   ```sh
+   git clone https://github.com/MichaelFiguresItOut/deepseek-harness.git dsh-fork
+   cd dsh-fork
+   pnpm install
+   pnpm run build
+   ```
+3. Start it with `pnpm dsh web`. Your settings, profiles, and sessions load exactly as before — only the harness code is different.
+
+Both checkouts share the same `.dsh` state, so you can start whichever one you want at any time, including going back to upstream.
+
+### Updating this fork later
+
+In your `dsh-fork` directory:
+
+```sh
+git pull
+pnpm install
+pnpm run build
+```
+
+Your settings and sessions are unaffected — they live in `.dsh`, not in the checkout.
+
 ## Issues encountered / bugs discovered
 
 ### 1. Compaction summaries silently truncated
