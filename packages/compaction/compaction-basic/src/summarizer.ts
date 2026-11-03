@@ -141,6 +141,12 @@ export async function summarizeWithLlm(
     )
   }
 
+  // A summary must not spend the output budget on reasoning. Request the
+  // model's off effort when it offers one; models without selectable efforts
+  // keep their existing behavior (no thinking control is sent).
+  const info = await ctx.llm.resolveModelInfo(target.provider, target.model, signal)
+  const offEffort = info.reasoning?.efforts.find(effort => effort.id === 'off')
+
   const assembler = new BlockAssembler()
   const messages: RequestMessage[] = [
     ...input.messages,
@@ -158,11 +164,18 @@ export async function summarizeWithLlm(
     maxTokens: config.maxTokens,
     sessionId: agent.session.id,
     purpose: 'compaction',
+    ...(offEffort === undefined ? {} : { reasoningEffort: offEffort.id }),
     ...signal === undefined ? {} : { signal },
   }
   for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)
   const error = finishError(assembler.finish)
   if (error !== undefined) throw error
+  // A success-kind finish at or over the cap is indistinguishable from a
+  // truncated stream: fail closed instead of checkpointing an incomplete summary.
+  const usage = assembler.usage
+  if (usage !== undefined && usage.outputTokens >= config.maxTokens) {
+    throw truncationError()
+  }
 
   const rawOutput = assembler.blocks()
   const summary = summaryText(rawOutput)
@@ -201,13 +214,18 @@ function finishError(finish: FinishReason): Error | undefined {
       return new LlmError(finish.failure.message, finish.failure.code, finish.failure)
     }
     case 'max-tokens': {
-      const error = new Error('summarization truncated at the token cap (incomplete checkpoint)') as Error & { code?: string }
-      error.code = 'MAX_TOKENS'
-      return error
+      return truncationError()
     }
     default:
       return undefined
   }
+}
+
+/** Build the fail-closed error for a summary truncated at the output cap. */
+function truncationError(): Error {
+  const error = new Error('summarization truncated at the token cap (incomplete checkpoint)') as Error & { code?: string }
+  error.code = 'MAX_TOKENS'
+  return error
 }
 
 /** Reject visual output and keep only text before synthesizing a user message. */

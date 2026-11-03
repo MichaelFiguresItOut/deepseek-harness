@@ -13,7 +13,7 @@ import {
   resolveTargetPolicy,
 } from '@deepseek-ai/dsh-compaction-basic/src/config.ts'
 import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
-import LlmRuntime, { createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, createSystemMessage, createToolResultMessage, LlmAdapter , createMessage } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, createSystemMessage, createToolResultMessage, LlmAdapter , ReasoningEffortId, createMessage } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
@@ -1351,6 +1351,43 @@ class ScriptedAdapter extends LlmAdapter {
   }
 }
 
+/** A scripted adapter whose model advertises a selectable off reasoning effort. */
+class ReasoningOffAdapter extends ScriptedAdapter {
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      reasoning: { efforts: [{ id: ReasoningEffortId('off'), name: 'Off' }] },
+    })
+  }
+}
+
+/** A scripted adapter whose stream ends without any terminal finish chunk. */
+class NoFinishAdapter extends LlmAdapter {
+  lastOptions: GenerateOptions | undefined
+
+  constructor(
+    private readonly blocks: readonly ContentBlock[],
+    private readonly usage: TokenUsage,
+  ) {
+    super()
+  }
+
+  override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.lastOptions = options
+    for (const [index, block] of this.blocks.entries()) {
+      yield { type: 'block-start', index, blockType: block.type }
+      if (block.type === 'text') {
+        yield { type: 'text-delta', index, text: block.text }
+      } else if (block.type === 'reasoning') {
+        yield { type: 'reasoning-delta', index, text: block.text }
+      }
+    }
+    yield { type: 'usage', usage: this.usage }
+  }
+}
+
 class ExposedCompactionEngine extends BasicCompactionEngine {
   runSummarize(
     input: SummarizationInput,
@@ -1670,6 +1707,73 @@ describe('default one-shot summarizer', () => {
     }])
     await expect(compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL)))
       .rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+  })
+
+  it('requests the off reasoning effort when the summarization model supports it', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionProjectionRegistry)
+    void new TokenMeter(ctx)
+    const adapter = new ReasoningOffAdapter([{ type: 'text', text: 'summary' }])
+    ctx.llm.registerAdapter([MODEL], adapter)
+    const compact = new ExposedCompactionEngine(ctx, { auto: false })
+
+    await expect(compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL)))
+      .resolves.toMatchObject({ provider: MODEL, model: MODEL })
+
+    expect(adapter.lastOptions?.reasoningEffort).toBe('off')
+  })
+
+  it('omits reasoning effort control for models without selectable efforts', async () => {
+    const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'summary' }])
+
+    await expect(compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL)))
+      .resolves.toMatchObject({ provider: MODEL, model: MODEL })
+
+    expect(adapter.lastOptions).not.toHaveProperty('reasoningEffort')
+  })
+
+  it.each([321, 500])('rejects a successful finish that consumed the full output budget %#', async (outputTokens) => {
+    const { adapter, compact } = await summarizerHarness(
+      [{ type: 'text', text: 'partial summary' }],
+      undefined,
+      MODEL,
+      { auto: false, maxTokens: 321 },
+    )
+    adapter.usage = { inputTokens: 12, outputTokens }
+
+    let thrown: unknown
+    try {
+      await compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL))
+    } catch (error: unknown) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toMatch(/token cap/)
+    expect((thrown as Error & { code?: string }).code).toBe('MAX_TOKENS')
+  })
+
+  it('rejects a stream that ends without a finish chunk once the output budget is spent', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionProjectionRegistry)
+    void new TokenMeter(ctx)
+    const adapter = new NoFinishAdapter(
+      [{ type: 'text', text: 'partial summary' }],
+      { inputTokens: 12, outputTokens: 321 },
+    )
+    ctx.llm.registerAdapter([MODEL], adapter)
+    const compact = new ExposedCompactionEngine(ctx, { auto: false, maxTokens: 321 })
+
+    let thrown: unknown
+    try {
+      await compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL))
+    } catch (error: unknown) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(Error)
+    expect((thrown as Error).message).toMatch(/token cap/)
+    expect((thrown as Error & { code?: string }).code).toBe('MAX_TOKENS')
   })
 })
 
