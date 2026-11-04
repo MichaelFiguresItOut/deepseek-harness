@@ -4,7 +4,7 @@
 
 Because the upstream DSH project does not accept GitHub Pull Requests, this repository was created to share this fix with the community.
 
-* **Base Version:** Forked on October 30, 2026 from upstream master at commit [`ce7073d512`](https://github.com/deepseek-ai/deepseek-harness/commit/ce7073d512). All fixes were committed to this fork by November 3, 2026.
+* **Base Version:** Forked on October 30, 2026 from upstream master at commit [`ce7073d512`](https://github.com/deepseek-ai/deepseek-harness/commit/ce7073d512).
 
 ##  Summary
 Compaction issues arose while running DSH against a local reasoning model ([unsloth/Qwen3.8 27B GGUF UD-IQ4-XS](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF)) served through an OpenAI-compatible endpoint (LM Studio) on the `openai-completions` route. Forked DSH and added these reliability and performance fixes to the compaction process: provider-reported token usage now survives session replay, reasoning-only messages are priced correctly on routes that drop them from later requests, and truncated compaction summaries fail closed instead of being checkpointed — with summarizer reasoning disabled where the model allows it.
