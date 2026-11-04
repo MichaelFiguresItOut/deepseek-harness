@@ -881,7 +881,7 @@ describe('provider profile lifecycle', () => {
     expect(server.requests[0]).toMatchObject({ reasoning_effort: 'minimal' })
   })
 
-  it('sends chat-template kwargs with thinking disabled for an explicit off effort', async () => {
+  it('sends reasoning_effort "none" on the wire for an explicit off effort', async () => {
     vi.stubEnv('PI_TEST_KEY', 'test-key')
     const server = await mockServer([{ events: textEvents }])
     const ctx = new Context()
@@ -898,8 +898,8 @@ describe('provider profile lifecycle', () => {
     })
 
     // The compaction summarizer selects 'off' explicitly; a Qwen route with no
-    // declared wire config answers through the chat-template kwargs that
-    // llama.cpp-backed servers such as LM Studio read, not reasoning_effort.
+    // declared wire config answers through the built-in effort map, whose off
+    // spelling pi-ai's generic branch sends as top-level reasoning_effort.
     await assemble(ctx, {
       provider: 'acme-gateway',
       model: 'qwen3-27b',
@@ -907,11 +907,11 @@ describe('provider profile lifecycle', () => {
       messages: [],
     })
     const request = server.requests[0] as Record<string, unknown>
-    expect(request.chat_template_kwargs).toEqual({ enable_thinking: false, preserve_thinking: true })
-    expect(Object.keys(request).sort()).toEqual(['chat_template_kwargs', 'max_completion_tokens', 'messages', 'model', 'store', 'stream', 'stream_options'])
+    expect(request.reasoning_effort).toBe('none')
+    expect(Object.keys(request).sort()).toEqual(['max_completion_tokens', 'messages', 'model', 'reasoning_effort', 'store', 'stream', 'stream_options'])
   })
 
-  it('sends chat-template kwargs with thinking enabled for an explicit low effort', async () => {
+  it('sends reasoning_effort "minimal" on the wire for an explicit low effort', async () => {
     vi.stubEnv('PI_TEST_KEY', 'test-key')
     const server = await mockServer([{ events: textEvents }])
     const ctx = new Context()
@@ -934,8 +934,8 @@ describe('provider profile lifecycle', () => {
       messages: [],
     })
     const request = server.requests[0] as Record<string, unknown>
-    expect(request.chat_template_kwargs).toEqual({ enable_thinking: true, preserve_thinking: true })
-    expect(Object.keys(request).sort()).toEqual(['chat_template_kwargs', 'max_completion_tokens', 'messages', 'model', 'store', 'stream', 'stream_options'])
+    expect(request.reasoning_effort).toBe('minimal')
+    expect(Object.keys(request).sort()).toEqual(['max_completion_tokens', 'messages', 'model', 'reasoning_effort', 'store', 'stream', 'stream_options'])
   })
 
   it('keeps normal turns free of reasoning fields for a defaulted Qwen model', async () => {
@@ -955,8 +955,8 @@ describe('provider profile lifecycle', () => {
     })
 
     // No effort selected: the adapter masks the model to non-reasoning before
-    // pi-ai sees it, so the chat-template branch stays silent and the request
-    // is byte-for-byte what a normal turn already sends.
+    // pi-ai sees it, so the generic branches stay silent and the request is
+    // byte-for-byte what a normal turn already sends.
     await assemble(ctx, { provider: 'acme-gateway', model: 'qwen3-27b', messages: [] })
     const request = server.requests[0] as Record<string, unknown>
     expect(request).not.toHaveProperty('chat_template_kwargs')

@@ -1318,11 +1318,11 @@ describe('configurable-provider directory', () => {
   })
 })
 
-describe('qwen chat-template defaults', () => {
-  it('defaults a bare Qwen on an OpenAI-compatible route to the chat-template wire', () => {
-    // A local gateway serving Qwen declares only the id; the adapter must give
-    // it off/low levels and the kwargs spelling llama.cpp-backed servers read,
-    // so compaction can turn thinking off without a per-user patch.
+describe('qwen reasoning-effort defaults', () => {
+  it('defaults a bare Qwen on an OpenAI-compatible route to off/low efforts without touching its compat', () => {
+    // A local gateway serving Qwen declares only the id; materialization must
+    // give it off/low levels so compaction can turn thinking off through
+    // reasoning_effort, with no per-user patch and no invented wire shape.
     const model = modelOf(declared([{ id: 'qwen3-27b' }]))
 
     expect(model.reasoning).toBe(true)
@@ -1336,12 +1336,12 @@ describe('qwen chat-template defaults', () => {
       max: null,
     })
     expect(getSupportedThinkingLevels(model)).toEqual(['off', 'low'])
-    expect(model.compat).toEqual({ thinkingFormat: 'qwen-chat-template' })
+    expect(model.compat).toBeUndefined()
   })
 
-  it('keeps user-declared efforts while still defaulting the wire format', () => {
-    // The user owns which levels exist; the adapter only supplies the wire
-    // spelling for a Qwen id nobody else configured.
+  it('keeps user-declared efforts instead of defaulting them', () => {
+    // The deployment owns which levels exist and how they spell on the wire;
+    // materialization only supplies a map for a Qwen id nobody configured.
     const model = modelOf(declared([{ id: 'qwen3-27b', reasoningEfforts: { off: null, medium: 'medium' } }]))
 
     expect(model.reasoning).toBe(true)
@@ -1354,12 +1354,14 @@ describe('qwen chat-template defaults', () => {
       max: null,
     })
     expect(getSupportedThinkingLevels(model)).toEqual(['off', 'medium'])
-    expect((model.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).toBe('qwen-chat-template')
+    expect(model.compat).toBeUndefined()
   })
 
-  it('lets a declared compat profile suppress the format default', () => {
+  it('passes a declared compat profile through beside the effort defaults', () => {
+    // Declaring any compat field means the deployment owns the wire shape; the
+    // declaration is kept exactly as written while efforts still default.
     const modelLevel = modelOf(declared([{ id: 'qwen3-27b', compat: { thinkingFormat: 'openai' } }]))
-    expect((modelLevel.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).toBe('openai')
+    expect(modelLevel.compat).toEqual({ thinkingFormat: 'openai' })
     // Efforts are still defaulted; the user owns the wire, not the levels.
     expect(modelLevel.reasoning).toBe(true)
     expect(getSupportedThinkingLevels(modelLevel)).toEqual(['off', 'low'])
@@ -1373,29 +1375,16 @@ describe('qwen chat-template defaults', () => {
       },
     })
     expect((routeLevel.compat as OpenAICompletionsCompat | undefined)?.supportsReasoningEffort).toBe(true)
-    expect((routeLevel.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).not.toBe('qwen-chat-template')
   })
 
-  it('treats schema-materialized empty compat dicts as undeclared', () => {
-    // The config schema materializes an absent dict-typed compat field as {},
-    // which is what a stored profile actually carries; the defaults must still
-    // reach such a model, at both declaration levels.
-    const modelLevel = modelOf(declared([{ id: 'qwen3-27b', compat: { chatTemplateKwargs: {}, chatTemplateArgs: {} } }]))
-    expect((modelLevel.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).toBe('qwen-chat-template')
-
-    const routeLevel = modelOf({
-      'acme-gateway': {
-        api: 'openai-completions',
-        baseURL: 'https://acme.test',
-        compat: { chatTemplateKwargs: {}, chatTemplateArgs: {} },
-        models: [{ id: 'qwen3-27b' }],
-      },
-    })
-    expect((routeLevel.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).toBe('qwen-chat-template')
-
-    // A non-empty dict is a real declaration and still suppresses the default.
-    const owned = modelOf(declared([{ id: 'qwen3-27b', compat: { chatTemplateKwargs: { enable_thinking: true } } }]))
-    expect((owned.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).not.toBe('qwen-chat-template')
+  it('keeps a declared kwargs profile for endpoints that steer thinking through chat templates', () => {
+    // An explicit qwen-chat-template declaration is the opt-in path for servers
+    // whose OpenAI layer honors chat_template_kwargs; materialization must not
+    // disturb it, and efforts still default beside it.
+    const model = modelOf(declared([{ id: 'qwen3-27b', compat: { thinkingFormat: 'qwen-chat-template' } }]))
+    expect(model.compat).toEqual({ thinkingFormat: 'qwen-chat-template' })
+    expect(model.reasoning).toBe(true)
+    expect(getSupportedThinkingLevels(model)).toEqual(['off', 'low'])
   })
 
   it('leaves installed-catalog Qwen entries untouched', () => {
