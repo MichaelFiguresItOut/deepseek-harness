@@ -1,26 +1,81 @@
-# DSH (Compaction Fixes Fork)
+# DSH Compaction Fix Fork
 
 **Important Notice:** This is an independent fork of the [original DSH repository](https://github.com/deepseek-ai/deepseek-harness) by [MichaelFiguresItOut](https://www.youtube.com/@MichaelFiguresItOut). Original Read.me info further below.
 
 Because the upstream DSH project does not accept GitHub Pull Requests, this repository was created to share this fix with the community.
 
-* **Base Version:** Forked on November 2, 2026 from upstream master at commit [`ce7073d512`](https://github.com/deepseek-ai/deepseek-harness/commit/ce7073d512) (October 30, 2026). All fixes were committed November 2–3, 2026.
-* **Primary Changes:** Adds reliability and performance fixes to the compaction process: provider-reported token usage now survives session replay, reasoning-only messages are priced correctly on routes that drop them from later requests, and truncated compaction summaries fail closed instead of being checkpointed — with summarizer reasoning disabled where the model allows it. Hand-listed Qwen models served through OpenAI-compatible endpoints (LM Studio, vLLM, llama.cpp) additionally receive built-in defaults so compaction sends thinking-off on endpoints that honor `chat_template_kwargs`, with no user configuration.
+* **Base Version:** Forked on October 30, 2026 from upstream master at commit [`ce7073d512`](https://github.com/deepseek-ai/deepseek-harness/commit/ce7073d512). All fixes were committed to this fork by November 3, 2026.
+
+##  Summary
+Compaction issues arose while running DSH against a local reasoning model ([unsloth/Qwen3.8 27B GGUF UD-IQ4-XS](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF)) served through an OpenAI-compatible endpoint (LM Studio) on the `openai-completions` route. Forked DSH and added these reliability and performance fixes to the compaction process: provider-reported token usage now survives session replay, reasoning-only messages are priced correctly on routes that drop them from later requests, and truncated compaction summaries fail closed instead of being checkpointed — with summarizer reasoning disabled where the model allows it.
+
+Hand-listed Qwen models served through OpenAI-compatible endpoints (LM Studio, vLLM, llama.cpp) additionally receive built-in defaults so compaction sends thinking-off on endpoints that honor `chat_template_kwargs`, with no user configuration.
+
+## Installing this fork
+
+### From scratch (no existing DSH)
+
+Prerequisites: [Node.js](https://nodejs.org/) **24.9 or newer** and pnpm (this repo pins pnpm 11.28.5 via its `packageManager` field):
+
+```sh
+# one-time setup
+npm install -g pnpm@11.28.5
+```
+
+Then clone this fork and build it. The bundled dependency patches are applied automatically during install — no manual steps:
+
+```sh
+git clone https://github.com/MichaelFiguresItOut/deepseek-harness.git dsh-fork
+cd dsh-fork
+pnpm install
+pnpm run build
+pnpm dsh web
+```
+
+Note: the upstream quick start (`npx @deepseek-ai/dsh web`) installs the **upstream** package from npm, not this fork. Use the steps above to get the compaction fixes.
+
+### Keeping your current settings
+
+DSH keeps all user state — settings, profiles, API keys (`.env`), and session history — in `~/.dsh` on macOS/Linux or `%USERPROFILE%\.dsh` on Windows (overridable with the `DSH_HOME` environment variable). That folder lives **outside** any repository checkout, so installing this fork never touches it.
+
+To move an existing install over to this fork without losing anything:
+
+1. Leave your `.dsh` folder exactly where it is — do not delete or overwrite it.
+2. Clone this fork into a new directory (next to your current setup is fine):
+   ```sh
+   git clone https://github.com/MichaelFiguresItOut/deepseek-harness.git dsh-fork
+   cd dsh-fork
+   pnpm install
+   pnpm run build
+   ```
+3. Start it with `pnpm dsh web`. Your settings, profiles, and sessions load exactly as before — only the harness code is different.
+
+Both checkouts share the same `.dsh` state, so you can start whichever one you want at any time, including going back to upstream.
+
+### Updating this fork later
+
+In your `dsh-fork` directory:
+
+```sh
+git pull
+pnpm install
+pnpm run build
+```
+
+Your settings and sessions are unaffected — they live in `.dsh`, not in the checkout.
 
 ## Issues encountered / bugs discovered
 
-All three issues were observed while running DSH against a local reasoning model served through an OpenAI-compatible endpoint (LM Studio) on the `openai-completions` route, and each was reproduced in the session journal before being fixed.
-
-### 1. Compaction summaries silently truncated — reliability bug
+### 1. Compaction summaries silently truncated
 Compaction repeatedly failed with `summarization truncated at the token cap` (ten consecutive failures were recorded in a single session). Two root causes:
 
 - **No post-stream guard.** When a provider ended the summarization stream exactly at the output cap *without* reporting a max-tokens finish reason, the harness treated the response as successful and checkpointed the incomplete summary as if it were complete — corrupting the compacted history for every subsequent turn.
 - **Reasoning ate the summary budget.** Models that think by default spent part of the summarizer's output-token budget on reasoning tokens before producing any summary text, making truncation far more likely on exactly the models where compaction matters most.
 
-### 2. Provider-reported token usage lost across session replay — accounting bug
+### 2. Provider-reported token usage lost across session replay
 The pi-ai adapter's durable replay state stored each assistant turn's content and stop reason but dropped the provider-reported `usage` record. After a session was resumed, the harness had to re-estimate those tokens heuristically, so its view of conversation size drifted from what the provider actually reported — making compaction trigger at the wrong time (too late, handing the summarizer an oversized input; or too early).
 
-### 3. Spurious double-compaction on reasoning models — performance bug
+### 3. Spurious double-compaction on reasoning models
 The `openai-completions` serializer omits assistant messages that carry no text and no tool calls, so a reasoning-only message never reaches the provider again on later turns. The token meter nevertheless carried its *full* usage total (prompt + output) forward as the baseline for context size — inflating estimates by exactly the tokens the provider would never re-bill, and triggering compaction more often than necessary (sometimes twice in a row with nothing new to say).
 
 ## Detailed changes (commit by commit)
@@ -70,6 +125,7 @@ Recent Qwen releases think by default, and the model's own chat template — wha
 - Typecheck: all 5 repository gates pass
 - Live end-to-end against a local reasoning model (LM Studio): real compaction **2/2**, confirming the endpoint accepts `role:"developer"` and the `"none"` effort wire spelling
 
+---
 ---
 
 # DeepSeek Harness
