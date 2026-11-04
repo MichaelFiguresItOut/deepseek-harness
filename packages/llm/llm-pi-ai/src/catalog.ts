@@ -827,6 +827,84 @@ function resolveModelCompat(
   return { compat: { ...inherited, ...configured } as ModelCompat }
 }
 
+/** Model ids naming a Qwen family member; `qwq` and other families do not match. */
+const QWEN_MODEL_ID = /qwen/i
+
+/**
+ * The reasoning efforts a defaulted Qwen model offers: thinking can be turned
+ * off — the compaction summarizer's opt-out — or left at the endpoint's low
+ * default, which is all an OpenAI-compatible Qwen deployment needs. `off`
+ * spells `none`, so pi-ai sends nothing for it; `low` spells `minimal`, the
+ * wire value such endpoints accept below their default.
+ */
+const QWEN_CHAT_TEMPLATE_EFFORTS: PiAiReasoningEfforts = { off: 'none', low: 'minimal' }
+
+/**
+ * Whether a parsed compat profile declares anything the deployment chose. The
+ * config schema materializes an absent dict-typed field as `{}`, so an object
+ * whose only values are empty dicts is indistinguishable from one that never
+ * declared any field — both mean "the deployment left the wire shape to us".
+ */
+function hasDeclaredCompatField(compat: PiAiCompatProfile | undefined): boolean {
+  if (compat === undefined) return false
+  return Object.values(compat).some(value =>
+    value !== undefined && value !== null
+    && !(typeof value === 'object' && !Array.isArray(value) && Object.keys(value as object).length === 0))
+}
+
+/**
+ * Built-in defaults for a hand-listed Qwen model served through an
+ * OpenAI-compatible endpoint — LM Studio, vLLM, llama.cpp server, and the like.
+ *
+ * Such endpoints run the model's own chat template, where recent Qwen releases
+ * think by default: nothing in the request turns thinking off, so a compaction
+ * summary spends its whole output budget on reasoning tokens and overflows at
+ * depth. pi-ai can only steer that through `chat_template_kwargs`, which it
+ * sends when the model both declares the `qwen-chat-template` dispatch format
+ * and carries reasoning capability — and neither is declared for a hand-listed
+ * model, whose id is all its profile gives: with no efforts the materialized
+ * model advertises no reasoning at all, so even the summarizer's off request
+ * has nothing to select. So materialization supplies both fields: an effort map
+ * offering `off` beside `low`, and the dispatch format that makes pi-ai send
+ * `enable_thinking` with it.
+ *
+ * The defaults reach only models nobody else owns. An installed catalog entry
+ * for the same provider and id keeps its own wire configuration — built-in
+ * Qwen entries on known providers (Cerebras, Groq, Cloudflare, Hugging Face)
+ * rely on pi-ai's baseURL detection rather than a declared format, so none of
+ * them take these defaults. A `reasoningEfforts` the deployment declares keeps
+ * reasoning as configured; a compat field with a real value at model or route
+ * level means the deployment owns the wire shape, so no dispatch format is
+ * invented for it. The config schema materializes an absent dict-typed compat
+ * field (`chatTemplateKwargs`, `chatTemplateArgs`) as `{}`, and those empty
+ * dicts count as undeclared — which is what lets this default reach a stored
+ * profile that declared nothing; declaring any other compat field, or a
+ * non-empty dict, opts out. A normal turn is untouched either way — with no
+ * effort selected the adapter masks the model to non-reasoning before pi-ai
+ * sees it, so the request goes out byte-for-byte as it did before these
+ * defaults.
+ */
+function qwenChatTemplateDefaults(
+  entry: PiAiModelProfile,
+  api: string,
+  base: Model<Api> | undefined,
+  routeCompat: PiAiCompatProfile | undefined,
+): PiAiModelProfile {
+  if (api !== 'openai-completions' || !QWEN_MODEL_ID.test(entry.id)) return entry
+  if (base !== undefined) return entry
+  let changed = false
+  const defaulted: PiAiModelProfile = { ...entry }
+  if (entry.reasoningEfforts === undefined) {
+    defaulted.reasoningEfforts = QWEN_CHAT_TEMPLATE_EFFORTS
+    changed = true
+  }
+  if (!hasDeclaredCompatField(entry.compat) && !hasDeclaredCompatField(routeCompat)) {
+    defaulted.compat = { thinkingFormat: 'qwen-chat-template' }
+    changed = true
+  }
+  return changed ? defaulted : entry
+}
+
 /** One route's materialized catalog, plus the request caps its profile chose. */
 export interface RouteCatalog {
   /** The materialized models in configuration order. */
@@ -920,6 +998,10 @@ export function resolveRouteModels(
       invalid(provider, `model "${entry.id}" needs an api; the installed catalog does not describe it, so set the`
         + ' route\'s api to the wire protocol its endpoint speaks')
     }
+
+    // Qwen models on OpenAI-compatible endpoints think by default and expose no
+    // wire field to turn it off; supply the defaults that let a request opt out.
+    const effectiveEntry = qwenChatTemplateDefaults(entry, api, base, request.compat)
     const baseUrl = request.baseURL ?? base?.baseUrl ?? providerBaseUrl
     if (baseUrl === undefined) {
       invalid(provider, `model "${entry.id}" needs a baseURL; the installed catalog does not describe this route`)
@@ -955,8 +1037,8 @@ export function resolveRouteModels(
       cost: base?.cost ?? NO_COST,
       contextWindow,
       maxTokens,
-      ...resolveModelReasoning(provider, entry, base),
-      ...resolveModelCompat(provider, entry, request.compat, base, api),
+      ...resolveModelReasoning(provider, effectiveEntry, base),
+      ...resolveModelCompat(provider, effectiveEntry, request.compat, base, api),
     }
   }
   const models: Model<Api>[] = []

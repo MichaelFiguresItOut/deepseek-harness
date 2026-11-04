@@ -5,7 +5,7 @@
 Because the upstream DSH project does not accept GitHub Pull Requests, this repository was created to share this fix with the community.
 
 * **Base Version:** Forked on November 2, 2026 from upstream master at commit [`ce7073d512`](https://github.com/deepseek-ai/deepseek-harness/commit/ce7073d512) (October 30, 2026). All fixes were committed November 2–3, 2026.
-* **Primary Changes:** Adds reliability and performance fixes to the compaction process: provider-reported token usage now survives session replay, reasoning-only messages are priced correctly on routes that drop them from later requests, and truncated compaction summaries fail closed instead of being checkpointed — with summarizer reasoning disabled where the model allows it.
+* **Primary Changes:** Adds reliability and performance fixes to the compaction process: provider-reported token usage now survives session replay, reasoning-only messages are priced correctly on routes that drop them from later requests, and truncated compaction summaries fail closed instead of being checkpointed — with summarizer reasoning disabled where the model allows it. Hand-listed Qwen models served through OpenAI-compatible endpoints (LM Studio, vLLM, llama.cpp) additionally receive built-in defaults so compaction sends thinking-off on endpoints that honor `chat_template_kwargs`, with no user configuration.
 
 ## Issues encountered / bugs discovered
 
@@ -48,6 +48,15 @@ Two fixes in the summarizer:
 
 Makes fix 3's "off effort" actually reach the wire on `openai-completions` routes without touching anything else. The adapter's model handoff now gates on route + explicit effort: with **no** reasoning effort requested, pi-ai receives `{...model, reasoning:false}` so no thinking control is sent at all — normal turns are byte-identical to upstream. With an **explicit** effort (e.g., the summarizer's `off`), the declared model is preserved and pi-ai sends the route's wire spelling (`"none"` / `"minimal"`).
 
+## Qwen chat-template defaults for hand-listed models on OpenAI-compatible endpoints
+
+Recent Qwen releases think by default, and the model's own chat template — what LM Studio, vLLM, and llama.cpp servers run — only steers thinking through `chat_template_kwargs`. A hand-listed model (a profile that declares nothing but an id) carries neither the reasoning-effort map nor the dispatch format that makes pi-ai send those kwargs, so a compaction summary spends its whole output budget on reasoning tokens. Model materialization now supplies both for any Qwen id (`/qwen/i`) on an `openai-completions` route:
+
+- **Automatic behavior:** compaction summaries go out with `chat_template_kwargs: { enable_thinking: false, preserve_thinking: true }`; normal turns are byte-identical to before (the adapter masks non-reasoning models before pi-ai sees them).
+- **Applies to:** Qwen model ids on user-declared `openai-completions` routes — LM Studio, vLLM, llama.cpp servers, and similar OpenAI-compatible endpoints. Built-in catalog entries that own the same provider/id (Cerebras, Groq, Cloudflare, Hugging Face) are untouched, as is any model entry that declares its own `reasoningEfforts` map or any entry/route that declares a compat field with a real value (an explicitly empty `chatTemplateKwargs`/`chatTemplateArgs` does not count).
+- **Requirements:** no configuration — the defaults apply to a bare `{ id: 'qwen3-27b' }` entry. The endpoint must actually honor top-level `chat_template_kwargs`: direct llama.cpp servers and vLLM do; LM Studio's OpenAI-compatible layer accepts but ignores the field (observed on 0.4.28, matching [lmstudio-bug-tracker #1990](https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/1990)), so thinking stays on there until a server build honors it.
+- **Verify:** run `pnpm exec vitest run packages/llm/llm-pi-ai/tests/catalog.spec.ts packages/llm/llm-pi-ai/tests/adapter.spec.ts`, or watch a compaction against your local endpoint and confirm the summarizer request carries `chat_template_kwargs` with `enable_thinking: false` **and** that the summary comes back without a `reasoning_content` field — endpoints that ignore the kwargs will still return one.
+
 ## What this fork does not change
 - Normal (non-compaction) turns: identical wire payloads to upstream on every route.
 - Routes that keep reasoning content on the wire: full-total usage accounting unchanged.
@@ -55,9 +64,9 @@ Makes fix 3's "off effort" actually reach the wire on `openai-completions` route
 - Legacy replay envelopes: read and written exactly as before when no usage pair is present.
 
 ## Verification
-- `packages/llm` full suite: **1739/1739** passing (includes new suites for replay usage preservation, reasoning-only pricing ×7, and the pi-ai hook ×5)
+- `packages/llm` full suite: **1748/1748** passing (includes new suites for replay usage preservation, reasoning-only pricing ×7, the pi-ai hook ×5, and Qwen chat-template defaults)
 - `compaction-basic`: **174/174** passing (new regression tests for truncation detection at/over budget, missing terminal finish chunks, and effort routing)
-- Focused regression run across all touched packages: **89/89**
+- Focused regression run across all touched packages: **89/89**; focused Qwen-defaults run (`catalog.spec.ts` + `adapter.spec.ts`): **144/144**
 - Typecheck: all 5 repository gates pass
 - Live end-to-end against a local reasoning model (LM Studio): real compaction **2/2**, confirming the endpoint accepts `role:"developer"` and the `"none"` effort wire spelling
 

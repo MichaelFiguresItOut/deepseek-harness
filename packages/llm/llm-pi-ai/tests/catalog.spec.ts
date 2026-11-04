@@ -670,19 +670,19 @@ describe('catalog routes with per-model configuration', () => {
   })
 })
 
+/** One hand-declared route holding exactly the given models. */
+function declared(models: LlmPiAi.PiAiModelProfile[]): Record<string, LlmPiAi.PiAiProviderProfile> {
+  return { 'acme-gateway': { api: 'openai-completions', baseURL: 'https://acme.test', models } }
+}
+
+/** The first materialized model of one route, or throw. */
+function modelOf(providers: Record<string, LlmPiAi.PiAiProviderProfile>, route = 'acme-gateway'): Model<Api> {
+  const [model] = resolveProfiles(providers).get(route)?.piProvider?.getModels() ?? []
+  if (model === undefined) throw new Error(`route "${route}" resolved no models`)
+  return model
+}
+
 describe('per-model reasoning efforts', () => {
-  /** One hand-declared route holding exactly the given models. */
-  function declared(models: LlmPiAi.PiAiModelProfile[]): Record<string, LlmPiAi.PiAiProviderProfile> {
-    return { 'acme-gateway': { api: 'openai-completions', baseURL: 'https://acme.test', models } }
-  }
-
-  /** The first materialized model of one route, or throw. */
-  function modelOf(providers: Record<string, LlmPiAi.PiAiProviderProfile>, route = 'acme-gateway'): Model<Api> {
-    const [model] = resolveProfiles(providers).get(route)?.piProvider?.getModels() ?? []
-    if (model === undefined) throw new Error(`route "${route}" resolved no models`)
-    return model
-  }
-
   it('declares selectable levels with their wire spellings on a hand-declared model', () => {
     const model = modelOf(declared([{
       id: 'acme-think',
@@ -1315,5 +1315,123 @@ describe('configurable-provider directory', () => {
       defaultBaseURL: 'https://chatgpt.com/backend-api',
       nativeAuth: { env: [], oauth: true },
     })
+  })
+})
+
+describe('qwen chat-template defaults', () => {
+  it('defaults a bare Qwen on an OpenAI-compatible route to the chat-template wire', () => {
+    // A local gateway serving Qwen declares only the id; the adapter must give
+    // it off/low levels and the kwargs spelling llama.cpp-backed servers read,
+    // so compaction can turn thinking off without a per-user patch.
+    const model = modelOf(declared([{ id: 'qwen3-27b' }]))
+
+    expect(model.reasoning).toBe(true)
+    expect(model.thinkingLevelMap).toEqual({
+      off: 'none',
+      minimal: null,
+      low: 'minimal',
+      medium: null,
+      high: null,
+      xhigh: null,
+      max: null,
+    })
+    expect(getSupportedThinkingLevels(model)).toEqual(['off', 'low'])
+    expect(model.compat).toEqual({ thinkingFormat: 'qwen-chat-template' })
+  })
+
+  it('keeps user-declared efforts while still defaulting the wire format', () => {
+    // The user owns which levels exist; the adapter only supplies the wire
+    // spelling for a Qwen id nobody else configured.
+    const model = modelOf(declared([{ id: 'qwen3-27b', reasoningEfforts: { off: null, medium: 'medium' } }]))
+
+    expect(model.reasoning).toBe(true)
+    expect(model.thinkingLevelMap).toEqual({
+      minimal: null,
+      low: null,
+      medium: 'medium',
+      high: null,
+      xhigh: null,
+      max: null,
+    })
+    expect(getSupportedThinkingLevels(model)).toEqual(['off', 'medium'])
+    expect((model.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).toBe('qwen-chat-template')
+  })
+
+  it('lets a declared compat profile suppress the format default', () => {
+    const modelLevel = modelOf(declared([{ id: 'qwen3-27b', compat: { thinkingFormat: 'openai' } }]))
+    expect((modelLevel.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).toBe('openai')
+    // Efforts are still defaulted; the user owns the wire, not the levels.
+    expect(modelLevel.reasoning).toBe(true)
+    expect(getSupportedThinkingLevels(modelLevel)).toEqual(['off', 'low'])
+
+    const routeLevel = modelOf({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test',
+        compat: { supportsReasoningEffort: true },
+        models: [{ id: 'qwen3-27b' }],
+      },
+    })
+    expect((routeLevel.compat as OpenAICompletionsCompat | undefined)?.supportsReasoningEffort).toBe(true)
+    expect((routeLevel.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).not.toBe('qwen-chat-template')
+  })
+
+  it('treats schema-materialized empty compat dicts as undeclared', () => {
+    // The config schema materializes an absent dict-typed compat field as {},
+    // which is what a stored profile actually carries; the defaults must still
+    // reach such a model, at both declaration levels.
+    const modelLevel = modelOf(declared([{ id: 'qwen3-27b', compat: { chatTemplateKwargs: {}, chatTemplateArgs: {} } }]))
+    expect((modelLevel.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).toBe('qwen-chat-template')
+
+    const routeLevel = modelOf({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test',
+        compat: { chatTemplateKwargs: {}, chatTemplateArgs: {} },
+        models: [{ id: 'qwen3-27b' }],
+      },
+    })
+    expect((routeLevel.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).toBe('qwen-chat-template')
+
+    // A non-empty dict is a real declaration and still suppresses the default.
+    const owned = modelOf(declared([{ id: 'qwen3-27b', compat: { chatTemplateKwargs: { enable_thinking: true } } }]))
+    expect((owned.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).not.toBe('qwen-chat-template')
+  })
+
+  it('leaves installed-catalog Qwen entries untouched', () => {
+    // Every built-in Qwen on an OpenAI-compatible protocol already owns its
+    // wire configuration, so the defaults must not reach it.
+    const builtins = getBuiltinProviders()
+      .flatMap(provider => getBuiltinModels(provider) as Model<Api>[])
+      .filter(model => model.api === 'openai-completions' && /qwen/i.test(model.id))
+    if (builtins.length === 0) throw new Error('the installed catalog ships no OpenAI-compatible Qwen entries')
+
+    const profiles: Record<string, LlmPiAi.PiAiProviderProfile> = {}
+    for (const builtin of builtins) {
+      const route = profiles[builtin.provider] ?? { models: [] }
+      route.models = [...(route.models ?? []), { id: builtin.id }]
+      profiles[builtin.provider] = route
+    }
+
+    const resolved = resolveProfiles(profiles)
+    for (const builtin of builtins) {
+      const model = resolved.get(builtin.provider)?.piProvider?.getModels().find(candidate => candidate.id === builtin.id)
+      if (model === undefined) throw new Error(`route "${builtin.provider}" lost ${builtin.id}`)
+      expect((model.compat as OpenAICompletionsCompat | undefined)?.thinkingFormat).not.toBe('qwen-chat-template')
+      expect(model.reasoning).toBe(builtin.reasoning)
+      expect(model.thinkingLevelMap).toEqual(builtin.thinkingLevelMap)
+    }
+  })
+
+  it('ignores non-Qwen ids and Qwen ids on other protocols', () => {
+    const notQwen = modelOf(declared([{ id: 'acme-large' }]))
+    expect(notQwen.reasoning).toBe(false)
+    expect(notQwen.compat).toBeUndefined()
+
+    const responsesRoute = modelOf({
+      'acme-gateway': { api: 'openai-responses', baseURL: 'https://acme.test', models: [{ id: 'qwen3-27b' }] },
+    })
+    expect(responsesRoute.reasoning).toBe(false)
+    expect(responsesRoute.compat).toBeUndefined()
   })
 })

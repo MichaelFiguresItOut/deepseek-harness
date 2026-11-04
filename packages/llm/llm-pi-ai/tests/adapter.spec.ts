@@ -881,6 +881,94 @@ describe('provider profile lifecycle', () => {
     expect(server.requests[0]).toMatchObject({ reasoning_effort: 'minimal' })
   })
 
+  it('sends chat-template kwargs with thinking disabled for an explicit off effort', async () => {
+    vi.stubEnv('PI_TEST_KEY', 'test-key')
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'acme-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'openai-completions',
+          baseURL: `${server.url}/v1`,
+          models: [{ id: 'qwen3-27b', contextWindow: 65_536, maxTokens: 4096 }],
+        },
+      },
+    })
+
+    // The compaction summarizer selects 'off' explicitly; a Qwen route with no
+    // declared wire config answers through the chat-template kwargs that
+    // llama.cpp-backed servers such as LM Studio read, not reasoning_effort.
+    await assemble(ctx, {
+      provider: 'acme-gateway',
+      model: 'qwen3-27b',
+      reasoningEffort: ReasoningEffortId('off'),
+      messages: [],
+    })
+    const request = server.requests[0] as Record<string, unknown>
+    expect(request.chat_template_kwargs).toEqual({ enable_thinking: false, preserve_thinking: true })
+    expect(Object.keys(request).sort()).toEqual(['chat_template_kwargs', 'max_completion_tokens', 'messages', 'model', 'store', 'stream', 'stream_options'])
+  })
+
+  it('sends chat-template kwargs with thinking enabled for an explicit low effort', async () => {
+    vi.stubEnv('PI_TEST_KEY', 'test-key')
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'acme-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'openai-completions',
+          baseURL: `${server.url}/v1`,
+          models: [{ id: 'qwen3-27b', contextWindow: 65_536, maxTokens: 4096 }],
+        },
+      },
+    })
+
+    await assemble(ctx, {
+      provider: 'acme-gateway',
+      model: 'qwen3-27b',
+      reasoningEffort: ReasoningEffortId('low'),
+      messages: [],
+    })
+    const request = server.requests[0] as Record<string, unknown>
+    expect(request.chat_template_kwargs).toEqual({ enable_thinking: true, preserve_thinking: true })
+    expect(Object.keys(request).sort()).toEqual(['chat_template_kwargs', 'max_completion_tokens', 'messages', 'model', 'store', 'stream', 'stream_options'])
+  })
+
+  it('keeps normal turns free of reasoning fields for a defaulted Qwen model', async () => {
+    vi.stubEnv('PI_TEST_KEY', 'test-key')
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'acme-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'openai-completions',
+          baseURL: `${server.url}/v1`,
+          models: [{ id: 'qwen3-27b', contextWindow: 65_536, maxTokens: 4096 }],
+        },
+      },
+    })
+
+    // No effort selected: the adapter masks the model to non-reasoning before
+    // pi-ai sees it, so the chat-template branch stays silent and the request
+    // is byte-for-byte what a normal turn already sends.
+    await assemble(ctx, { provider: 'acme-gateway', model: 'qwen3-27b', messages: [] })
+    const request = server.requests[0] as Record<string, unknown>
+    expect(request).not.toHaveProperty('chat_template_kwargs')
+    expect(request).not.toHaveProperty('reasoning_effort')
+    expect(Object.keys(request).sort()).toEqual(['max_completion_tokens', 'messages', 'model', 'store', 'stream', 'stream_options'])
+    expect(request.model).toBe('qwen3-27b')
+    expect(request.stream).toBe(true)
+    expect(request.store).toBe(false)
+    expect(request.max_completion_tokens).toBe(4096)
+    expect(request.stream_options).toEqual({ include_usage: true })
+  })
+
   it('holds back reasoning_effort when the endpoint cannot take it', async () => {
     vi.stubEnv('PI_TEST_KEY', 'test-key')
     const server = await mockServer([{ events: textEvents }])
